@@ -64,6 +64,26 @@ app.post('/api/chat', async (req, res) => {
         );
         console.log(`✅ Saved User Message to MySQL -> Chat: ${sessionId}`);
 
+        
+        // ==========================================
+        // NEW: FETCH CHAT HISTORY FOR AI CONTEXT
+        // ==========================================
+        // FIX: Grab the MOST RECENT 8 messages (DESC), then reverse them to chronological order!
+        const [historyRows] = await db.execute(
+            'SELECT sender, message_text FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 10',
+            [sessionId]
+        );
+        historyRows.reverse(); // Put them in reading order: oldest -> newest
+
+        // Format the rows into a readable script for the AI
+        let conversationHistory = "";
+        historyRows.forEach(row => {
+            const role = row.sender === 'user' ? 'User' : 'Nexus AI';
+            conversationHistory += `${role}: ${row.message_text}\n`;
+        });
+        
+        console.log("Loaded Conversation History:\n", conversationHistory);
+
 
         // ==========================================
         // STEP 1: Ask Gemini to generate an SQL query
@@ -72,11 +92,17 @@ app.post('/api/chat', async (req, res) => {
         You are an expert database administrator. 
         Here is the schema for my MySQL database:
         ${DATABASE_SCHEMA}
+
+        CONVERSATION HISTORY (Context for pronouns/references):
+        ${conversationHistory}
         
-        The user asked: "${userMessage}"
+        CURRENT REQUEST: "${userMessage}"
         
-        Write a MySQL query to answer this question. 
-        Return ONLY the raw SQL query. Include markdown formatting like \`\`\`sql. Do not explain anything.
+        CRITICAL RULES FOR THE SQL QUERY:
+        1. CONTEXT IS EVERYTHING: Look at the Conversation History. If the AI previously showed a table for a specific filter (like the "Engineering" department), and the user says "there", "those", or "them", YOU MUST apply that exact same filter to this new query (e.g., add WHERE department = 'Engineering').
+        2. Do not query the entire table if the user is asking a follow-up question about a specific sub-group.
+        3. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT name, salary) or just use SELECT *.
+        4. Return ONLY the raw SQL query. Include markdown formatting like \`\`\`sql. Do not explain anything.
         `;
 
         const sqlResult = await model.generateContent(sqlPrompt);
@@ -109,6 +135,10 @@ app.post('/api/chat', async (req, res) => {
         // STEP 3: Ask Gemini to summarize the data
         // ==========================================
         const summaryPrompt = `
+
+        CONVERSATION HISTORY (Use this to understand what the user is referring to):
+        ${conversationHistory}
+
         The user asked: "${userMessage}"
         
         I attempted to retrieve data from my database for this request. Here is the result of that attempt: 
