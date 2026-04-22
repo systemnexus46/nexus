@@ -41,23 +41,19 @@ app.post('/api/chat', async (req, res) => {
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
         // ==========================================
-        // NEW: SAVE USER MESSAGE TO MYSQL
+        // SAVE USER MESSAGE TO MYSQL
         // ==========================================
-        // 1. Check if this is a new chat session. If yes, create it!
         const [existingSession] = await db.execute('SELECT id FROM chat_sessions WHERE id = ?', [sessionId]);
         if (existingSession.length === 0) {
-            // Make a short title from the first message
             const title = userMessage.length > 30 ? userMessage.substring(0, 30) + '...' : userMessage;
             await db.execute(
                 'INSERT INTO chat_sessions (id, user_id, title) VALUES (?, ?, ?)', 
                 [sessionId, userId, title]
             );
         } else {
-            // Update the 'updated_at' timestamp so this chat moves to the top
             await db.execute('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [sessionId]);
         }
 
-        // 2. Save the actual message bubble to the messages table
         await db.execute(
             'INSERT INTO messages (session_id, sender, message_text) VALUES (?, ?, ?)',
             [sessionId, 'user', userMessage]
@@ -66,16 +62,14 @@ app.post('/api/chat', async (req, res) => {
 
         
         // ==========================================
-        // NEW: FETCH CHAT HISTORY FOR AI CONTEXT
+        // FETCH CHAT HISTORY FOR AI CONTEXT
         // ==========================================
-        // FIX: Grab the MOST RECENT 8 messages (DESC), then reverse them to chronological order!
         const [historyRows] = await db.execute(
             'SELECT sender, message_text FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 10',
             [sessionId]
         );
-        historyRows.reverse(); // Put them in reading order: oldest -> newest
+        historyRows.reverse(); 
 
-        // Format the rows into a readable script for the AI
         let conversationHistory = "";
         historyRows.forEach(row => {
             const role = row.sender === 'user' ? 'User' : 'Nexus AI';
@@ -83,7 +77,6 @@ app.post('/api/chat', async (req, res) => {
         });
         
         console.log("Loaded Conversation History:\n", conversationHistory);
-
 
         // ==========================================
         // STEP 1: Ask Gemini to generate an SQL query
@@ -98,95 +91,124 @@ app.post('/api/chat', async (req, res) => {
         
         CURRENT REQUEST: "${userMessage}"
         
-        CRITICAL RULES FOR THE SQL QUERY:
-        1. CONTEXT IS EVERYTHING: Look at the Conversation History. If the AI previously showed a table for a specific filter (like the "Engineering" department), and the user says "there", "those", or "them", YOU MUST apply that exact same filter to this new query (e.g., add WHERE department = 'Engineering').
-        2. Do not query the entire table if the user is asking a follow-up question about a specific sub-group.
-        3. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT name, salary) or just use SELECT *.
-        4. Return ONLY the raw SQL query. Include markdown formatting like \`\`\`sql. Do not explain anything.
+        CRITICAL RULES FOR THE AI:
+        1. CONTEXT IS EVERYTHING: Look at the Conversation History. If the AI previously showed a table with a specific filter, OR if the AI just inserted/updated a specific record, and the user uses pronouns like "there", "their", "those", "them", "he", "she", or "this", YOU MUST apply that exact context to the new query.
+        
+        AMBIGUITY & CLARIFICATION:
+        2. If the user's request is vague, ambiguous, uses undefined terms (e.g., asking for the "best" or "top" employees without defining how to measure it), or asks for data that doesn't exist in the table schema, DO NOT guess or write an SQL query. Instead, ask a clear, conversational follow-up question to clarify their exact intent (e.g., "By 'top employees', do you mean the ones with the highest salary?").
+        
+        QUERY GENERATION:
+        3. Do not query the entire table if the user is asking a follow-up question about a specific sub-group.
+        4. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT name, salary) or just use SELECT *.
+        
+        DATA INSERTION PROTOCOL:
+        5. When a user asks to add, insert, or create new data, DO NOT generate an SQL query immediately. First, verify if the user provided all required column values (Name, Department, Salary).
+        6. If details are missing, DO NOT write an SQL query. Instead, ask a conversational follow-up question for the missing details. NEVER guess, hallucinate, or make up data. NEVER manually assign an 'id' like '1' (it will auto-increment).
+        
+        OUTPUT FORMATTING:
+        7. If you have enough clear information to write the SQL query, return ONLY the raw SQL query using markdown formatting like \`\`\`sql. Do not explain anything.
+        8. If you are asking a follow-up question for missing data (Rule 6) OR clarifying an ambiguous request (Rule 2), return ONLY the plain text question. Do not use SQL formatting or markdown blocks.
         `;
 
         const sqlResult = await model.generateContent(sqlPrompt);
-        // Clean up the string just in case the AI added markdown blocks
         let rawQuery = sqlResult.response.text().replace(/```sql|```/g, '').trim();
-        console.log("AI Generated Query:", rawQuery);
+        console.log("AI Generated Output:", rawQuery);
 
         // ==========================================
-        // STEP 2: Execute the Query in Node.js
+        // 🟢 THE FIX: Check if it's SQL or a Question!
         // ==========================================
-        let dbData = "No data retrieved"; // Default message
-        
-        // THE SHIELD: Only run this if the AI gave us a real query
-        if (rawQuery && rawQuery !== "") {
+        const isSqlQuery = rawQuery.toUpperCase().startsWith('SELECT') || 
+                           rawQuery.toUpperCase().startsWith('INSERT') || 
+                           rawQuery.toUpperCase().startsWith('UPDATE') || 
+                           rawQuery.toUpperCase().startsWith('DELETE');
+
+        if (isSqlQuery) {
+            console.log("AI wrote an SQL query. Executing...");
+            
+            // ==========================================
+            // STEP 2: Execute the Query in Node.js
+            // ==========================================
+            let dbData = "No data retrieved"; 
+            
             try {
-                // Run the AI's query against our actual database
                 const [rows] = await db.execute(rawQuery);
                 dbData = JSON.stringify(rows);
                 console.log("Database Results:", dbData);
             } catch (dbError) {
                 console.error("Database execution failed:", dbError.message);
-                // If the query fails, we just tell the AI what the error was
                 dbData = `Error executing query: ${dbError.message}`;
             }
+
+            // ==========================================
+            // STEP 3: Ask Gemini to summarize the data
+            // ==========================================
+            const summaryPrompt = `
+            CONVERSATION HISTORY (Use this to understand what the user is referring to):
+            ${conversationHistory}
+
+            The user asked: "${userMessage}"
+            
+            I attempted to retrieve data from my database for this request. Here is the result of that attempt: 
+            ${dbData}
+            
+            System Instruction (Contextual Presentation):
+            You are Nexus ai, a database assistant. Your job is to analyze the inputs and follow these rules precisely to craft the final answer:
+
+            NEVER use DISTINCT inside a window function (e.g., do NOT use COUNT(DISTINCT column) OVER()). 
+            
+            If you need to return a total distinct count alongside individual rows, use a standard subquery instead, like: (SELECT COUNT(DISTINCT column) FROM table).
+            
+            1.  **Rule for valid Data Results:** If the database result contains valid, non-error database rows (a JSON list of objects), and the user is asking a data-related question (e.g., "show me", "list", "tell me about"), then you must format this data as a clean, beautiful Markdown table. Add a brief, friendly introductory sentence.
+            
+            2.  **Rule for Non-Data Questions (like hii,how are , can tell me something):** If the user is just having a casual chat, asking for a general information about else, or asking a question that is clearly NOT about database data, respond with a friendly, conversational text answer. Do NOT use a table in this case. Just have a normal conversation.
+            
+            3.  **Rule for Errors:** If the database result is an error message, explain the error to the user in simple, friendly terms.
+
+            4.  **Always format currency using the Indian Rupee symbol (₹) instead of the Dollar symbol ($).
+
+            5.  **If user ask a question, which give a single or double line answers, in a number or word, use the bullet points and other fucntionality to display and make it professional look.
+
+            6.  **when user ask about engineers, but in the records there is engineering and that time you give a engineering records to user, don't tell there is no records about engineers, same as testing ,tester, the words what ever the users give related words in the record match the words if it gives same relationship then get the record and give it to the user. 
+            
+            7.  **STRICT COLUMN SELECTION: You must ONLY select and return the exact columns the user explicitly asks for. If the user asks for "salary", your SQL query must only be SELECT salary FROM table. Do NOT add names, IDs, or departments to provide "context" unless the user explicitly requests them.
+            
+            8.  **ALWAYS INCLUDE VALUES:** If the database results contain specific numbers, amounts, or values (such as a salary of 90000), you MUST explicitly include those exact numbers in your final written response. Never just give the name; always state the value too.
+
+            Final Constraint: Do not mention technical implementation details (like SQL or how you got the data). Just answer the user directly and friendly.
+            `;
+
+            const finalResult = await model.generateContent(summaryPrompt);
+            const aiText = finalResult.response.text();
+
+            // ==========================================
+            // SAVE AI MESSAGE TO MYSQL
+            // ==========================================
+            await db.execute(
+                'INSERT INTO messages (session_id, sender, message_text) VALUES (?, ?, ?)',
+                [sessionId, 'ai', aiText]
+            );
+            console.log(`✅ Saved AI Summary Message to MySQL -> Chat: ${sessionId}`);
+
+            res.json({ reply: aiText });
+
         } else {
-            console.log("Skipping database execution: AI did not generate a valid SQL query.");
+            // ==========================================
+            // AI ASKED A QUESTION (Skipping DB & Summary)
+            // ==========================================
+            console.log("AI asked a clarification question. Skipping database.");
+            
+            await db.execute(
+                'INSERT INTO messages (session_id, sender, message_text) VALUES (?, ?, ?)',
+                [sessionId, 'ai', rawQuery]
+            );
+            console.log(`✅ Saved AI Question Message to MySQL -> Chat: ${sessionId}`);
+
+            res.json({ reply: rawQuery });
         }
 
-        // ==========================================
-        // STEP 3: Ask Gemini to summarize the data
-        // ==========================================
-        const summaryPrompt = `
-
-        CONVERSATION HISTORY (Use this to understand what the user is referring to):
-        ${conversationHistory}
-
-        The user asked: "${userMessage}"
-        
-        I attempted to retrieve data from my database for this request. Here is the result of that attempt: 
-        ${dbData}
-        
-        System Instruction (Contextual Presentation):
-        You are Nexus ai, a database assistant. Your job is to analyze the inputs and follow these rules precisely to craft the final answer:
-
-        NEVER use DISTINCT inside a window function (e.g., do NOT use COUNT(DISTINCT column) OVER()). 
-        
-        If you need to return a total distinct count alongside individual rows, use a standard subquery instead, like: (SELECT COUNT(DISTINCT column) FROM table).
-        
-        1.  **Rule for valid Data Results:** If the database result contains valid, non-error database rows (a JSON list of objects), and the user is asking a data-related question (e.g., "show me", "list", "tell me about"), then you must format this data as a clean, beautiful Markdown table. Add a brief, friendly introductory sentence.
-        
-        2.  **Rule for Non-Data Questions (like hii,how are , can tell me something):** If the user is just having a casual chat, asking for a general information about else, or asking a question that is clearly NOT about database data, respond with a friendly, conversational text answer. Do NOT use a table in this case. Just have a normal conversation.
-        
-        3.  **Rule for Errors:** If the database result is an error message, explain the error to the user in simple, friendly terms.
-
-        4.  **Always format currency using the Indian Rupee symbol (₹) instead of the Dollar symbol ($).
-
-        5.  **If user ask a question, which give a single or double line answers, in a number or word, use the bullet points and other fucntionality to display and make it professional look.
-
-        6.  when user ask about engineers, but in the records there is engineering and that time you give a engineering records to user, don't tell there is no records about engineers, same as testing ,tester, the words what ever the users give related words in the record match the words if it gives same relationship then get the record and give it to the user. 
-        
-        7. **STRICT COLUMN SELECTION: You must ONLY select and return the exact columns the user explicitly asks for. If the user asks for "salary", your SQL query must only be SELECT salary FROM table. Do NOT add names, IDs, or departments to provide "context" unless the user explicitly requests them.
-        
-        Final Constraint: Do not mention technical implementation details (like SQL or how you got the data). Just answer the user directly and friendly.
-        `;
-
-        const finalResult = await model.generateContent(summaryPrompt);
-        const aiText = finalResult.response.text();
-
-        // ==========================================
-        // NEW: SAVE AI MESSAGE TO MYSQL
-        // ==========================================
-        await db.execute(
-            'INSERT INTO messages (session_id, sender, message_text) VALUES (?, ?, ?)',
-            [sessionId, 'ai', aiText]
-        );
-        console.log(`✅ Saved AI Message to MySQL -> Chat: ${sessionId}`);
-
-        // Send the final conditional answer back to the frontend
-        res.json({ reply: aiText });
-
-    }catch (error) {
+    } catch (error) {
         console.error("AI Generation Error:", error);
 
-        // 1. Determine which error message to show
         let aiFallbackMessage = "⚠️ Core system error. I lost connection to the AI processing unit. Please try again.";
 
         if (error.status === 429) {
@@ -195,7 +217,6 @@ app.post('/api/chat', async (req, res) => {
             aiFallbackMessage = "⏳ Google's AI servers are currently experiencing unusually high traffic. Please wait a minute and try again!";
         }
 
-        // 2. NEW: Save the AI's fallback warning to the database so it stays after a refresh!
         try {
             await db.execute(
                 'INSERT INTO messages (session_id, sender, message_text) VALUES (?, ?, ?)',
@@ -205,7 +226,6 @@ app.post('/api/chat', async (req, res) => {
             console.error("Could not save fallback message to DB:", dbError);
         }
 
-        // 3. Send the message to the frontend screen
         res.json({ reply: aiFallbackMessage });
     }
 });
