@@ -120,7 +120,8 @@ app.post('/api/chat', async (req, res) => {
         const isSqlQuery = rawQuery.toUpperCase().startsWith('SELECT') || 
                            rawQuery.toUpperCase().startsWith('INSERT') || 
                            rawQuery.toUpperCase().startsWith('UPDATE') || 
-                           rawQuery.toUpperCase().startsWith('DELETE');
+                           rawQuery.toUpperCase().startsWith('DELETE') ||
+                           rawQuery.toUpperCase().startsWith('ALTER');
 
         if (isSqlQuery) {
             console.log("AI wrote an SQL query. Executing...");
