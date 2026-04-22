@@ -81,10 +81,21 @@ app.post('/api/chat', async (req, res) => {
         // ==========================================
         // STEP 1: Ask Gemini to generate an SQL query
         // ==========================================
+
+        const [schemaRows] = await db.execute('DESCRIBE employees');
+        const liveSchema = schemaRows.map(row => `${row.Field} (${row.Type})`).join(', ');
+        
+        // Get the names of all columns EXCEPT 'id' (since id auto-increments)
+        const requiredColumns = schemaRows
+            .filter(row => row.Field.toLowerCase() !== 'id')
+            .map(row => row.Field)
+            .join(', ');
+
         const sqlPrompt = `
         You are an expert database administrator. 
-        Here is the schema for my MySQL database:
-        ${DATABASE_SCHEMA}
+        Here is the LIVE schema for my MySQL database:
+        Table: employees
+        Columns: ${liveSchema}
 
         CONVERSATION HISTORY (Context for pronouns/references):
         ${conversationHistory}
@@ -99,19 +110,36 @@ app.post('/api/chat', async (req, res) => {
         
         QUERY GENERATION:
         3. Do not query the entire table if the user is asking a follow-up question about a specific sub-group.
-        4. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT name, salary) or just use SELECT *.
+        4. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT id, name, salary).
         
         DATA INSERTION PROTOCOL:
         5. When a user asks to add, insert, or create new data, DO NOT generate an SQL query immediately. First, verify if the user provided all required column values (Name, Department, Salary).
         6. If details are missing, DO NOT write an SQL query. Instead, ask a conversational follow-up question for the missing details. NEVER guess, hallucinate, or make up data. NEVER manually assign an 'id' like '1' (it will auto-increment).
         
-        OUTPUT FORMATTING:
-        7. If you have enough clear information to write the SQL query, return ONLY the raw SQL query using markdown formatting like \`\`\`sql. Do not explain anything.
+        OUTPUT FORMATTING (CRITICAL):
+        7. STRICT SQL OUTPUT: If you are generating an SQL query, your response MUST start immediately with the SQL command (SELECT, INSERT, UPDATE, DELETE, or ALTER). NEVER write your thought process, reasoning, or introductory text. DO NOT explain yourself. Return ONLY the raw query.
         8. If you are asking a follow-up question for missing data (Rule 6) OR clarifying an ambiguous request (Rule 2), return ONLY the plain text question. Do not use SQL formatting or markdown blocks.
+        
+        SCHEMA MODIFICATION (ALTER TABLE):
+        9. If a user asks to add or remove a column in a table, DO NOT generate the SQL immediately. First, ask for the data type (e.g., INT, VARCHAR) if they didn't provide one. Once they provide the data type, return ONLY the raw 'ALTER TABLE' SQL query.
         `;
 
         const sqlResult = await model.generateContent(sqlPrompt);
-        let rawQuery = sqlResult.response.text().replace(/```sql|```/g, '').trim();
+
+
+        let rawAiResponse = sqlResult.response.text().trim();
+        let rawQuery = rawAiResponse;
+
+        // SMART EXTRACTOR: If the AI accidentally talks but puts the SQL in a ```sql block, pull ONLY the code!
+        const sqlMatch = rawAiResponse.match(/```sql([\s\S]*?)```/i);
+        if (sqlMatch) {
+            rawQuery = sqlMatch[1].trim(); 
+        } else {
+            // Clean up any stray backticks just in case
+            rawQuery = rawQuery.replace(/```sql|```/ig, '').trim();
+        }
+
+
         console.log("AI Generated Output:", rawQuery);
 
         // ==========================================
@@ -132,8 +160,16 @@ app.post('/api/chat', async (req, res) => {
             let dbData = "No data retrieved"; 
             
             try {
-                const [rows] = await db.execute(rawQuery);
-                dbData = JSON.stringify(rows);
+                const individualQueries = rawQuery.split(';').filter(q => q.trim() !== '');
+                let allResults = [];
+
+                for (let singleQuery of individualQueries) {
+                    // Execute each query separately
+                    const [rows] = await db.execute(singleQuery.trim());
+                    allResults.push(rows);
+                }
+                
+                dbData = JSON.stringify(allResults);
                 console.log("Database Results:", dbData);
             } catch (dbError) {
                 console.error("Database execution failed:", dbError.message);
