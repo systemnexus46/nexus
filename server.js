@@ -111,6 +111,7 @@ app.post('/api/chat', async (req, res) => {
         QUERY GENERATION:
         3. Do not query the entire table if the user is asking a follow-up question about a specific sub-group.
         4. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT id, name, salary).
+        5. HANDLING TIES: When a user asks for ranked data (e.g., "highest", "top 3", "second highest"), you MUST account for ties. If multiple rows share the same value, your SQL MUST return all of them. Use window functions like DENSE_RANK() or subqueries. NEVER use a simple LIMIT clause if it risks cutting off tied records.
         
         DATA INSERTION PROTOCOL:
         5. When a user asks to add, insert, or create new data, DO NOT generate an SQL query immediately. First, verify if the user provided all required column values (Name, Department, Salary).
