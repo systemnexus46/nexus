@@ -196,6 +196,8 @@ app.post('/api/chat', async (req, res) => {
             
             If you need to return a total distinct count alongside individual rows, use a standard subquery instead, like: (SELECT COUNT(DISTINCT column) FROM table).
             
+            Whenever you retrieve and display database records in a table, you MUST always include the name column as the very first column in your markdown table or plain text. Avoid to display id column, untill the user specifically ask it.
+
             1.  **Rule for valid Data Results:** If the database result contains valid, non-error database rows (a JSON list of objects), and the user is asking a data-related question (e.g., "show me", "list", "tell me about"), then you must format this data as a clean, beautiful Markdown table. Add a brief, friendly introductory sentence.
             
             2.  **Rule for Non-Data Questions (like hii,how are , can tell me something):** If the user is just having a casual chat, asking for a general information about else, or asking a question that is clearly NOT about database data, respond with a friendly, conversational text answer. Do NOT use a table in this case. Just have a normal conversation.
