@@ -601,6 +601,93 @@ app.post('/api/verify-otp', (req, res) => {
 });
 
 
+//---------------------------------------------------------------
+
+
+// ==========================================
+// REGISTRATION FLOW: STEP 1 - Check Email
+// ==========================================
+app.post('/api/check-email', async (req, res) => {
+    try {
+        const { email } = req.body;
+        const [users] = await db.query('SELECT email_id FROM users WHERE email_id = ?', [email]);
+        // If length is > 0, the email exists
+        res.json({ exists: users.length > 0 });
+    } catch (err) {
+        console.error("Check Email Error:", err);
+        res.status(500).json({ error: "Database error" });
+    }
+});
+
+// ==========================================
+// REGISTRATION FLOW: STEP 2 - Send OTP
+// ==========================================
+app.post('/api/register-send-otp', (req, res) => {
+    const { email, name } = req.body;
+    
+    // Generate 4-digit OTP and store it in temporary memory using the email as the key
+    const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
+    activeOTPs[email] = generatedOTP; 
+
+    const mailOptions = {
+        from: 'systemnexuscore@gmail.com',
+        to: email,
+        subject: 'NEXUS Security: Account Registration',
+        html: `
+            <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
+                <h2>WELCOME TO NEXUS CORE</h2>
+                <p>Hello ${name}, to complete your registration, please use the verification code below:</p>
+                <h1 style="color: #0080ff; font-size: 40px; letter-spacing: 5px;">${generatedOTP}</h1>
+            </div>
+        `
+    };
+
+    transporter.sendMail(mailOptions, (error, info) => {
+        if (error) {
+            console.error("Nodemailer Registration Error:", error);
+            return res.json({ success: false, error: "Failed to send email." });
+        }
+        res.json({ success: true });
+    });
+});
+
+// ==========================================
+// REGISTRATION FLOW: STEP 3 - Verify OTP
+// ==========================================
+app.post('/api/register-verify-otp', (req, res) => {
+    const { email, otp } = req.body;
+
+    if (activeOTPs[email] && activeOTPs[email] === otp) {
+        delete activeOTPs[email]; // Clear it after success
+        res.json({ success: true });
+    } else {
+        res.json({ success: false, error: "Invalid or expired OTP." });
+    }
+});
+
+// ==========================================
+// REGISTRATION FLOW: STEP 4 - Save User
+// ==========================================
+app.post('/api/register', async (req, res) => {
+    try {
+        const { fullName, email_id, password } = req.body;
+        
+        // Auto-generate a username from the first part of their email
+        const username = email_id.split('@')[0];
+
+        await db.execute(
+            'INSERT INTO users (username, full_name, email_id, password, role, field_type, theme) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [username, fullName, email_id, password, 'User', 'General', 'system']
+        );
+        
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Database Registration Error:", err);
+        res.status(500).json({ success: false, error: "Registration failed." });
+    }
+});
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Backend Server running on port ${PORT}`);
