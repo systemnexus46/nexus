@@ -500,9 +500,9 @@ app.put('/api/users/:userId/profile', async (req, res) => {
 // Set up Nodemailer to use a Gmail account
 const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
-    port: 465,             // Secure port
-    secure: true,
-    service: 'gmail',
+    port: 587,             // Secure port
+    secure: false,
+    requireTLS: true,
     auth: {
         user: 'systemnexuscore@gmail.com',     // 👈 Put your real Gmail address here
         pass: 'smzshshngakzddkk'         // 👈 Put your Gmail "App Password" here (See Step 3)
@@ -511,6 +511,14 @@ const transporter = nodemailer.createTransport({
         rejectUnauthorized: false 
     },
     family: 4
+});
+
+transporter.verify(function(error, success) {
+  if (error) {
+    console.log("⚠️ SMTP Connection Error:", error);
+  } else {
+    console.log("✅ SMTP Server is ready to take our messages");
+  }
 });
 
 // ==========================================
