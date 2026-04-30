@@ -505,7 +505,7 @@ const transporter = nodemailer.createTransport({
     requireTLS: true,
     auth: {
         user: 'systemnexuscore@gmail.com',     // 👈 Put your real Gmail address here
-        pass: 'smzshshngakzddkk'         // 👈 Put your Gmail "App Password" here (See Step 3)
+        pass: 'spqbzwgmdskaggwb'         // 👈 Put your Gmail "App Password" here (See Step 3)
     },
     tls: {
         rejectUnauthorized: false 
