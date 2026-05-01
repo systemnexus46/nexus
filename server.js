@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise'); // Note the /promise
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors({
@@ -495,94 +494,119 @@ app.put('/api/users/:userId/profile', async (req, res) => {
 
 
 // ==========================================
-// 1. ROUTE TO GENERATE & SEND EMAIL OTP
-// ==========================================
-// Set up Nodemailer to use a Gmail account
-const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,             // Secure port
-    secure: true,
-    auth: {
-        user: 'systemnexuscore@gmail.com',     // 👈 Put your real Gmail address here
-        pass: 'lchnhubatssccabl'         // 👈 Put your Gmail "App Password" here (See Step 3)
-    },
-    tls: {
-        rejectUnauthorized: false 
-    },
-    family: 4
-});
-
-// ==========================================
-// 1. ROUTE TO GENERATE & SEND EMAIL OTP (ASYNC FIX)
+// 1. ROUTE TO GENERATE & SEND EMAIL OTP (FORGOT PASSWORD)
 // ==========================================
 app.post('/api/send-otp', async (req, res) => {
-    console.log("\n--- NEW OTP REQUEST STARTED ---");
+    console.log("\n--- NEW OTP REQUEST STARTED (BREVO API) ---");
     const { username } = req.body;
-    console.log("1. Received User ID from frontend:", username);
 
     try {
-        console.log("2. Asking MySQL Database for the email...");
-        
-        // THE FIX: Using await instead of a callback function!
         const [users] = await db.query("SELECT email_id FROM users WHERE username = ?", [username]);
         
-        console.log("3. MySQL Database responded!");
-
         if (users.length === 0) {
-            console.log("4. User not found in DB.");
             return res.json({ success: false, error: "User ID not found." });
         }
 
         const userEmail = users[0].email_id;
-        console.log("5. Found email in DB:", userEmail);
-
         if (!userEmail) {
-             return res.json({ success: false, error: "No email address registered to this account." });
+             return res.json({ success: false, error: "No email address registered." });
         }
 
         const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
         activeOTPs[username] = generatedOTP;
 
-        const mailOptions = {
-            from: 'systemnexuscore@gmail.com', // 👈 Put your real Gmail here
-            to: userEmail,
-            subject: 'NEXUS Security: Your Verification Code',
-            html: `
-                <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
-                    <h2>NEXUS CORE SYSTEM</h2>
-                    <p>A password reset was requested for the User ID: <strong>${username}</strong></p>
-                    <p>Your 4-digit authorization code is:</p>
-                    <h1 style="color: #0284c7; font-size: 40px; letter-spacing: 5px;">${generatedOTP}</h1>
-                    <p style="color: #5f6368; font-size: 12px;">If you did not request this, please ignore this email.</p>
-                </div>
-            `
-        };
+        // Brevo API Fetch Request
+        const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'api-key': 'process.env.BREVO_API_KEY' // 👈 PASTE YOUR KEY HERE
+            },
+            body: JSON.stringify({
+                sender: { name: "Nexus Core System", email: "systemnexuscore@gmail.com" },
+                to: [{ email: userEmail }],
+                subject: "NEXUS Security: Your Verification Code",
+                htmlContent: `
+                    <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
+                        <h2>NEXUS CORE SYSTEM</h2>
+                        <p>A password reset was requested for the User ID: <strong>${username}</strong></p>
+                        <p>Your 4-digit authorization code is:</p>
+                        <h1 style="color: #0284c7; font-size: 40px; letter-spacing: 5px;">${generatedOTP}</h1>
+                        <p style="color: #5f6368; font-size: 12px;">If you did not request this, please ignore this email.</p>
+                    </div>
+                `
+            })
+        });
 
-        console.log("6. Handing off to Nodemailer...");
-        transporter.sendMail(mailOptions, (error, info) => {
-            console.log("7. Nodemailer finished!");
-            
-            if (error) {
-                console.error("NODEMAILER ERROR:", error);
-                return res.json({ success: false, error: "Failed to send email." });
-            }
-
-            console.log("8. Success! Telling frontend to open the OTP box.");
-            
+        if (response.ok) {
+            console.log("✅ Brevo Email Sent Successfully!");
             const [name, domain] = userEmail.split('@');
             const maskedEmail = name.length > 2 
                 ? `${name[0]}***${name[name.length - 1]}@${domain}` 
                 : `***@${domain}`;
 
             res.json({ success: true, maskedContact: maskedEmail });
-        });
+        } else {
+            const errorData = await response.json();
+            console.error("⚠️ BREVO API ERROR:", errorData);
+            res.json({ success: false, error: "Email API rejected the request." });
+        }
 
     } catch (err) {
-        // This catches any database errors immediately
-        console.error("DB ERROR AT STEP 2:", err);
+        console.error("SERVER ERROR:", err);
         return res.json({ success: false, error: "Database error." });
     }
 });
+
+
+// ==========================================
+// 2. ROUTE TO GENERATE & SEND EMAIL OTP (NEW REGISTRATION)
+// ==========================================
+app.post('/api/register-send-otp', async (req, res) => {
+    console.log("\n--- NEW REGISTRATION OTP REQUEST (BREVO API) ---");
+    const { email, name } = req.body;
+    
+    const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
+    activeOTPs[email] = generatedOTP; 
+
+    try {
+        const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'api-key': 'process.env.BREVO_API_KEY' // 👈 PASTE YOUR KEY HERE
+            },
+            body: JSON.stringify({
+                sender: { name: "Nexus Core System", email: "systemnexuscore@gmail.com" },
+                to: [{ email: email }],
+                subject: "NEXUS Security: Account Registration",
+                htmlContent: `
+                    <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
+                        <h2>WELCOME TO NEXUS CORE</h2>
+                        <p>Hello ${name}, to complete your registration, please use the verification code below:</p>
+                        <h1 style="color: #0080ff; font-size: 40px; letter-spacing: 5px;">${generatedOTP}</h1>
+                    </div>
+                `
+            })
+        });
+
+        if (response.ok) {
+            console.log("✅ Brevo Registration Email Sent!");
+            res.json({ success: true });
+        } else {
+            const errorData = await response.json();
+            console.error("⚠️ BREVO API ERROR:", errorData);
+            res.json({ success: false, error: "Failed to send email via API." });
+        }
+    } catch (error) {
+        console.error("SERVER ERROR:", error);
+        res.json({ success: false, error: "Server connection failed." });
+    }
+});
+
+
 
 // ==========================================
 // 2. ROUTE TO VERIFY OTP
@@ -619,37 +643,7 @@ app.post('/api/check-email', async (req, res) => {
     }
 });
 
-// ==========================================
-// REGISTRATION FLOW: STEP 2 - Send OTP
-// ==========================================
-app.post('/api/register-send-otp', (req, res) => {
-    const { email, name } = req.body;
-    
-    // Generate 4-digit OTP and store it in temporary memory using the email as the key
-    const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
-    activeOTPs[email] = generatedOTP; 
 
-    const mailOptions = {
-        from: 'systemnexuscore@gmail.com',
-        to: email,
-        subject: 'NEXUS Security: Account Registration',
-        html: `
-            <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
-                <h2>WELCOME TO NEXUS CORE</h2>
-                <p>Hello ${name}, to complete your registration, please use the verification code below:</p>
-                <h1 style="color: #0080ff; font-size: 40px; letter-spacing: 5px;">${generatedOTP}</h1>
-            </div>
-        `
-    };
-
-    transporter.sendMail(mailOptions, (error, info) => {
-        if (error) {
-            console.error("Nodemailer Registration Error:", error);
-            return res.json({ success: false, error: "Failed to send email." });
-        }
-        res.json({ success: true });
-    });
-});
 
 // ==========================================
 // REGISTRATION FLOW: STEP 3 - Verify OTP
