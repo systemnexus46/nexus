@@ -515,6 +515,13 @@ app.post('/api/send-otp', async (req, res) => {
         const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
         activeOTPs[username] = generatedOTP;
 
+        console.log("\n--- DEBUGGING ---");
+        console.log("Does the server see the key?: ", process.env.BREVO_API_KEY ? "YES!" : "NO! IT IS EMPTY.");
+        if (process.env.BREVO_API_KEY) {
+            console.log("Key starts with: ", process.env.BREVO_API_KEY.substring(0, 10) + "...");
+        }
+        console.log("-----------------\n");
+
         // Brevo API Fetch Request
         const response = await fetch('https://api.brevo.com/v3/smtp/email', {
             method: 'POST',
