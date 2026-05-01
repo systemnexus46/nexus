@@ -522,13 +522,15 @@ app.post('/api/send-otp', async (req, res) => {
         }
         console.log("-----------------\n");
 
+        const cleanApiKey = process.env.BREVO_API_KEY.replace(/['"]/g, '').trim();
+
         // Brevo API Fetch Request
         const response = await fetch('https://api.brevo.com/v3/smtp/email', {
             method: 'POST',
             headers: {
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
-                'api-key': 'process.env.BREVO_API_KEY' // 👈 PASTE YOUR KEY HERE
+                'api-key': cleanApiKey          // 👈 PASTE YOUR KEY HERE
             },
             body: JSON.stringify({
                 sender: { name: "Nexus Core System", email: "systemnexuscore@gmail.com" },
@@ -578,12 +580,15 @@ app.post('/api/register-send-otp', async (req, res) => {
     activeOTPs[email] = generatedOTP; 
 
     try {
+        
+        const cleanApiKey = process.env.BREVO_API_KEY.replace(/['"]/g, '').trim();
+
         const response = await fetch('https://api.brevo.com/v3/smtp/email', {
             method: 'POST',
             headers: {
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
-                'api-key': 'process.env.BREVO_API_KEY' // 👈 PASTE YOUR KEY HERE
+                'api-key': cleanApiKey  // 👈 PASTE YOUR KEY HERE
             },
             body: JSON.stringify({
                 sender: { name: "Nexus Core System", email: "systemnexuscore@gmail.com" },
