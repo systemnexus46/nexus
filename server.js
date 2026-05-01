@@ -515,6 +515,11 @@ app.post('/api/send-otp', async (req, res) => {
         const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
         activeOTPs[username] = generatedOTP;
 
+        setTimeout(() => {
+            delete activeOTPs[email];
+            console.log(`OTP for ${email} has expired.`);
+        }, 300000);
+
         console.log("\n--- DEBUGGING ---");
         console.log("Does the server see the key?: ", process.env.BREVO_API_KEY ? "YES!" : "NO! IT IS EMPTY.");
         if (process.env.BREVO_API_KEY) {
@@ -539,7 +544,7 @@ app.post('/api/send-otp', async (req, res) => {
                 htmlContent: `
                     <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
                         <h2>NEXUS CORE SYSTEM</h2>
-                        <p>A password reset was requested for the User ID: <strong>${username}</strong></p>
+                        <p>A password reset was requested for the Username: <strong>${username}</strong></p>
                         <p>Your 4-digit authorization code is:</p>
                         <h1 style="color: #0284c7; font-size: 40px; letter-spacing: 5px;">${generatedOTP}</h1>
                         <p style="color: #5f6368; font-size: 12px;">If you did not request this, please ignore this email.</p>
@@ -578,6 +583,11 @@ app.post('/api/register-send-otp', async (req, res) => {
     
     const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
     activeOTPs[email] = generatedOTP; 
+
+    setTimeout(() => {
+    delete activeOTPs[email];
+    console.log(`OTP for ${email} has expired.`);
+    }, 300000);
 
     try {
         
