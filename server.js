@@ -25,10 +25,7 @@ const db = mysql.createPool(process.env.DATABASE_URL || {
 const activeOTPs = {};
 
 // Provide the AI with your database structure so it knows how to write queries
-const DATABASE_SCHEMA = `
-Table: employees
-Columns: id (INT), name (VARCHAR), department (VARCHAR), salary (INT)
-`;
+
 
 app.post('/api/chat', async (req, res) => {
     console.log("👉 INCOMING DATA FROM FRONTEND:", req.body);
@@ -81,20 +78,33 @@ app.post('/api/chat', async (req, res) => {
         // STEP 1: Ask Gemini to generate an SQL query
         // ==========================================
 
-        const [schemaRows] = await db.execute('DESCRIBE employees');
-        const liveSchema = schemaRows.map(row => `${row.Field} (${row.Type})`).join(', ');
+        // 🟢 NEW: Find ONLY the tables that start with this user's ID
+        const [userTables] = await db.query(`SHOW TABLES LIKE 'user_${userId}_%'`);
         
-        // Get the names of all columns EXCEPT 'id' (since id auto-increments)
-        const requiredColumns = schemaRows
-            .filter(row => row.Field.toLowerCase() !== 'id')
-            .map(row => row.Field)
-            .join(', ');
+        let liveSchema = "";
+        let allowedTableNames = [];
+
+        if (userTables.length === 0) {
+            liveSchema = "The user has no tables. Tell them to use the Create Connection box to build their database first.";
+        } else {
+            // Loop through their tables and get the exact columns for each one
+            for (let row of userTables) {
+                const tableName = Object.values(row)[0];
+                allowedTableNames.push(tableName.toLowerCase());
+                
+                const [columns] = await db.query(`DESCRIBE ${tableName}`);
+                const colDefs = columns.map(c => `${c.Field} (${c.Type})`).join(', ');
+                liveSchema += `Table: ${tableName}\nColumns: ${colDefs}\n\n`;
+            }
+        }
+
+        console.log(`Loaded Schema for User ${userId}:\n`, liveSchema);
 
         const sqlPrompt = `
-        You are an expert database administrator. 
-        Here is the LIVE schema for my MySQL database:
-        Table: employees
-        Columns: ${liveSchema}
+        You are an expert database administrator for a multi-tenant SaaS. 
+        Here is the LIVE schema for THIS specific user's database:
+
+        ${liveSchema}
 
         CONVERSATION HISTORY (Context for pronouns/references):
         ${conversationHistory}
@@ -109,7 +119,7 @@ app.post('/api/chat', async (req, res) => {
         
         QUERY GENERATION:
         3. Do not query the entire table if the user is asking a follow-up question about a specific sub-group.
-        4. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT id, name, salary).
+        4. ALWAYS include the relevant data columns in your SELECT statement (e.g., if asking for highest salary, SELECT name, salary).
         5. HANDLING TIES: When a user asks for ranked data (e.g., "highest", "top 3", "second highest"), you MUST account for ties. If multiple rows share the same value, your SQL MUST return all of them. Use window functions like DENSE_RANK() or subqueries. NEVER use a simple LIMIT clause if it risks cutting off tied records.
         
         DATA INSERTION PROTOCOL:
@@ -122,6 +132,19 @@ app.post('/api/chat', async (req, res) => {
         
         SCHEMA MODIFICATION (ALTER TABLE):
         9. If a user asks to add or remove a column in a table, DO NOT generate the SQL immediately. First, ask for the data type (e.g., INT, VARCHAR) if they didn't provide one. Once they provide the data type, return ONLY the raw 'ALTER TABLE' SQL query.
+        
+        SCHEMA VALIDATION RULES:
+        10. If the user asks to create a new table, IMMEDIATELY check the LIVE schema provided above.
+        11. If the requested table name already exists in their schema (ignoring prefixes), DO NOT ask for columns or generate SQL. Politely inform them that the table already exists and ask if they want to choose a different name or modify the existing one.
+        12. MULTI-TENANT SECRECY: Never reveal the 'user_${userId}_' prefix in your conversational responses. If you must name a table to the user, strip the prefix (e.g., call it 'cloths' instead of 'user_9_cloths').
+        
+        META-QUERIES & DATABASE STATE:
+        13. If the user asks general questions like "which tables have data", "how many records do I have", or "show me table sizes", DO NOT ask for permission to write the query. You MUST immediately generate a single SQL query using 'UNION ALL' to get the COUNT(*) of every table provided in the LIVE schema. 
+        Example format: 
+        SELECT 'table1' AS Table_Name, COUNT(*) AS Total_Rows FROM table1 
+        UNION ALL 
+        SELECT 'table2', COUNT(*) FROM table2;
+
         `;
 
         const sqlResult = await model.generateContent(sqlPrompt);
@@ -152,7 +175,31 @@ app.post('/api/chat', async (req, res) => {
                            rawQuery.toUpperCase().startsWith('ALTER');
 
         if (isSqlQuery) {
-            console.log("AI wrote an SQL query. Executing...");
+            
+            console.log("AI wrote an SQL query. Inspecting for security...");
+            
+            // ==========================================
+            // 🟢 NEW: THE SECURITY GATEKEEPER
+            // ==========================================
+            const queryLower = rawQuery.toLowerCase();
+            
+            // 1. Block access to system tables
+            const forbiddenTables = [' users', ' chat_sessions', ' messages'];
+            const isForbidden = forbiddenTables.some(t => queryLower.includes(t));
+            
+            // 2. Ensure the query actually targets their specific table prefix
+            const hasUserPrefix = queryLower.includes(`user_${userId}_`);
+
+            if (isForbidden || (!hasUserPrefix && allowedTableNames.length > 0)) {
+                console.error(`🚨 SECURITY ALERT: Blocked unauthorized query from User ${userId} ->`, rawQuery);
+                
+                const blockMessage = "I can only access the custom tables you created in your setup. I cannot access system data or other databases.";
+                
+                await db.execute('INSERT INTO messages (session_id, sender, message_text) VALUES (?, ?, ?)', [sessionId, 'ai', blockMessage]);
+                return res.json({ reply: blockMessage });
+            }
+
+            console.log("Query passed security check. Executing...");
             
             // ==========================================
             // STEP 2: Execute the Query in Node.js
@@ -195,7 +242,7 @@ app.post('/api/chat', async (req, res) => {
             
             If you need to return a total distinct count alongside individual rows, use a standard subquery instead, like: (SELECT COUNT(DISTINCT column) FROM table).
             
-            Whenever you retrieve and display database records in a table, you MUST always include the name column as the very first column in your markdown table or plain text. Avoid to display id column, untill the user specifically ask it.
+            Whenever you retrieve and display database records in a table, you MUST always include the name column as the very first column in your markdown table or plain text. Avoid to display id column only, untill the user specifically ask it.
 
             1.  **Rule for valid Data Results:** If the database result contains valid, non-error database rows (a JSON list of objects), and the user is asking a data-related question (e.g., "show me", "list", "tell me about"), then you must format this data as a clean, beautiful Markdown table. Add a brief, friendly introductory sentence.
             
@@ -213,11 +260,19 @@ app.post('/api/chat', async (req, res) => {
             
             8.  **ALWAYS INCLUDE VALUES:** If the database results contain specific numbers, amounts, or values (such as a salary of 90000), you MUST explicitly include those exact numbers in your final written response. Never just give the name; always state the value too.
 
+            9. **MULTI-TENANT SECRECY:** Never reveal the 'user_${userId}_' prefix when naming tables. Always call them by their base name (e.g., 'cloths', 'electronics').
+
             Final Constraint: Do not mention technical implementation details (like SQL or how you got the data). Just answer the user directly and friendly.
             `;
 
             const finalResult = await model.generateContent(summaryPrompt);
-            const aiText = finalResult.response.text();
+            let aiText = finalResult.response.text();
+
+            // ==========================================
+            // 🪄 SANITIZE AI SUMMARY (Remove user prefix)
+            // ==========================================
+            const prefixRegex = new RegExp(`user_${userId}_`, 'g');
+            aiText = aiText.replace(prefixRegex, '');
 
             // ==========================================
             // SAVE AI MESSAGE TO MYSQL
@@ -236,13 +291,19 @@ app.post('/api/chat', async (req, res) => {
             // ==========================================
             console.log("AI asked a clarification question. Skipping database.");
             
+            // ==========================================
+            // 🪄 SANITIZE AI QUESTION (Remove user prefix)
+            // ==========================================
+            const prefixRegex = new RegExp(`user_${userId}_`, 'g');
+            const cleanAiQuestion = rawQuery.replace(prefixRegex, '');
+            
             await db.execute(
                 'INSERT INTO messages (session_id, sender, message_text) VALUES (?, ?, ?)',
-                [sessionId, 'ai', rawQuery]
+                [sessionId, 'ai', cleanAiQuestion] // 🟢 Save clean version!
             );
             console.log(`✅ Saved AI Question Message to MySQL -> Chat: ${sessionId}`);
 
-            res.json({ reply: rawQuery });
+            res.json({ reply: cleanAiQuestion }); // 🟢 Send clean version!
         }
 
     } catch (error) {
@@ -386,6 +447,44 @@ app.get('/api/chats/:userId', async (req, res) => {
     } catch (error) {
         console.error("Error fetching history:", error);
         res.status(500).json({ error: "Failed to load history" });
+    }
+});
+
+
+// ==========================================
+// GET USER SCHEMA FOR DYNAMIC UI PILLS
+// ==========================================
+app.get('/api/users/:userId/schema', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        // Find this user's tables
+        const [userTables] = await db.query(`SHOW TABLES LIKE 'user_${userId}_%'`);
+        
+        if (userTables.length === 0) {
+            return res.json({ success: true, hasData: false });
+        }
+
+        // Pick the first table they created to use for the suggestions
+        const fullTableName = Object.values(userTables[0])[0];
+        const cleanTableName = fullTableName.replace(`user_${userId}_`, '');
+
+        // Get the columns for that table
+        const [columns] = await db.query(`DESCRIBE ${fullTableName}`);
+        
+        // Filter out the 'id' column so we get meaningful columns like 'brand' or 'name'
+        const colNames = columns.filter(c => c.Field !== 'id').map(c => c.Field);
+
+        res.json({
+            success: true,
+            hasData: true,
+            tableName: cleanTableName,
+            columns: colNames
+        });
+
+    } catch (error) {
+        console.error("Error fetching user schema:", error);
+        res.status(500).json({ success: false, error: "Database error" });
     }
 });
 
@@ -691,15 +790,193 @@ app.post('/api/register', async (req, res) => {
         // Auto-generate a username from the first part of their email
         const username = email_id.split('@')[0];
 
-        await db.execute(
+        // 🟢 FIX: Add "const [result] =" to capture the MySQL response
+        const [result] = await db.execute(
             'INSERT INTO users (username, full_name, email_id, password, role, field_type, theme) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [username, fullName, email_id, password, 'User', 'General', 'system']
         );
         
-        res.json({ success: true });
+        // 🟢 FIX: Send back the brand new user ID (insertId) to the frontend
+        res.json({ 
+            success: true, 
+            userId: result.insertId 
+        });
     } catch (err) {
         console.error("Database Registration Error:", err);
         res.status(500).json({ success: false, error: "Registration failed." });
+    }
+});
+
+
+// ==========================================
+// INITIALIZE USER SCHEMA (VISUAL & RAW SQL)
+// ==========================================
+app.post('/api/schema/initialize', async (req, res) => {
+    console.log("\n--- NEW SCHEMA INITIALIZATION ---");
+    const { userId, dbName, dbUser, dbPass, tables, rawSql } = req.body;
+
+    if (!userId) return res.json({ success: false, error: "Missing user ID." });
+    if ((!tables || tables.length === 0) && !rawSql) {
+        return res.json({ success: false, error: "Missing table data or SQL." });
+    }
+
+    try {
+        // Save Logical Credentials
+        await db.query(
+            'UPDATE users SET logical_db_name = ?, logical_db_user = ?, logical_db_pass = ? WHERE id = ?',
+            [dbName, dbUser, dbPass, userId]
+        );
+        console.log(`Saved logical database '${dbName}' for User ${userId}`);
+
+        // ------------------------------------------
+        // ROUTE A: VISUAL BUILDER
+        // ------------------------------------------
+        if (tables && tables.length > 0) {
+            
+            // 🟢 GUARDRAIL 1: TABLE LIMIT (MAX 5)
+            const [existingTables] = await db.query(`SHOW TABLES LIKE 'user_${userId}_%'`);
+            if ((existingTables.length + tables.length) > 5) {
+                return res.json({ success: false, error: "Free tier limit reached: Maximum 5 tables allowed." });
+            }
+
+            for (let table of tables) {
+                // 🟢 GUARDRAIL 2: COLUMN LIMIT (MAX 30)
+                if (table.columns && table.columns.length > 30) {
+                    return res.json({ 
+                        success: false, 
+                        error: `Limit reached: Table '${table.tableName}' has ${table.columns.length} columns. Maximum allowed is 30.` 
+                    });
+                }
+
+                const prefixedTableName = `user_${userId}_${table.tableName}`;
+                let columnDefinitions = [];
+                for (let col of table.columns) {
+                    let colString = `${col.name} ${col.type}`;
+                    if (col.isPk) colString += " PRIMARY KEY";
+                    if (col.isAi) colString += " AUTO_INCREMENT";
+                    columnDefinitions.push(colString);
+                }
+                const createTableSql = `CREATE TABLE IF NOT EXISTS ${prefixedTableName} (${columnDefinitions.join(', ')});`;
+                console.log(`Executing Visual: ${createTableSql}`);
+                await db.query(createTableSql);
+            }
+        } 
+        
+        // ------------------------------------------
+        // ROUTE B: RAW SQL BUILDER
+        // ------------------------------------------
+        else if (rawSql) {
+            console.log(`Processing Raw SQL for User ${userId}...`);
+            
+            // Split multiple commands by semicolon
+            const queries = rawSql.split(';').filter(q => q.trim() !== '');
+            
+            for (let query of queries) {
+                let cleanQuery = query.trim();
+                
+                // 🪄 1. INTERCEPT 'CREATE DATABASE'
+                const createDbMatch = cleanQuery.match(/^CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?([`'"]?[a-zA-Z0-9_]+[`'"]?)/i);
+                
+                if (createDbMatch) {
+                    let extractedDbName = createDbMatch[1].replace(/[`'"]/g, '');
+                    console.log(`Intercepted CREATE DATABASE. Saving '${extractedDbName}' logically for User ${userId}.`);
+                    await db.query('UPDATE users SET logical_db_name = ? WHERE id = ?', [extractedDbName, userId]);
+                    continue; 
+                }
+
+                // 🪄 2. INTERCEPT 'USE' COMMAND
+                if (/^USE\s+/i.test(cleanQuery)) {
+                    console.log("Intercepted USE command. Skipping context switch.");
+                    continue; 
+                }
+
+                // 🚨 3. SECURITY GATEKEEPER
+                if (/drop\s+database|alter\s+database|truncate|users|messages|chat_sessions/i.test(cleanQuery)) {
+                    console.error(`🚨 BLOCKED MALICIOUS SQL FROM USER ${userId}:`, cleanQuery);
+                    throw new Error("Action blocked by Nexus Security. You cannot modify system tables or architectures.");
+                }
+
+                // 🟢 GUARDRAIL 3: RAW SQL TABLE & COLUMN LIMIT CHECK
+                const createTableMatch = cleanQuery.match(/create\s+table\s+(?:if\s+not\s+exists\s+)?[`'"]?[a-z0-9_]+[`'"]?\s*\(([^;]+)\)/i);
+                if (createTableMatch) {
+                    // Check Table Count
+                    const [existingTables] = await db.query(`SHOW TABLES LIKE 'user_${userId}_%'`);
+                    if (existingTables.length >= 5) {
+                        return res.json({ success: false, error: "Free tier limit reached: Maximum 5 tables allowed." });
+                    }
+                    // Check Column Count
+                    const columnDefinitions = createTableMatch[1].split(',');
+                    if (columnDefinitions.length > 30) {
+                        return res.json({ success: false, error: "Free tier limit reached: Maximum 30 columns per table allowed." });
+                    }
+                }
+
+                // 🟢 GUARDRAIL 4: RAW SQL ROW LIMIT CHECK
+                const insertMatch = cleanQuery.match(/(INSERT\s+INTO\s+)([`'"]?[a-zA-Z0-9_]+[`'"]?)/i);
+                if (insertMatch) {
+                    let strippedTable = insertMatch[2].replace(/[`'"]/g, '');
+                    // Determine the actual table name in the DB
+                    const actualTableName = strippedTable.startsWith(`user_${userId}_`) ? strippedTable : `user_${userId}_${strippedTable}`;
+                    
+                    try {
+                        const [countResult] = await db.query(`SELECT COUNT(*) as total FROM ${actualTableName}`);
+                        if (countResult[0].total >= 100) {
+                            return res.json({ 
+                                success: false, 
+                                error: `Row limit reached! The table '${strippedTable.replace(`user_${userId}_`, '')}' already contains 100 rows.` 
+                            });
+                        }
+                    } catch (err) {
+                        // Table doesn't exist yet; ignore and let MySQL handle any subsequent errors
+                    }
+                }
+
+                // 🪄 4. MAGIC REGEX PARSER: Automatically rewrite table names
+                cleanQuery = cleanQuery.replace(/(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)([`'"]?[a-zA-Z0-9_]+[`'"]?)/gi, (match, sqlCommand, rawTableName) => {
+                    let strippedTable = rawTableName.replace(/[`'"]/g, ''); 
+                    return `${sqlCommand} user_${userId}_${strippedTable}`;
+                });
+                
+                cleanQuery = cleanQuery.replace(/(INSERT\s+INTO\s+)([`'"]?[a-zA-Z0-9_]+[`'"]?)/gi, (match, sqlCommand, rawTableName) => {
+                    let strippedTable = rawTableName.replace(/[`'"]/g, ''); 
+                    // Prevent double-prefixing if the user somehow typed the prefix manually
+                    if (strippedTable.startsWith(`user_${userId}_`)) return `${sqlCommand} ${strippedTable}`;
+                    return `${sqlCommand} user_${userId}_${strippedTable}`;
+                });
+
+                console.log(`Executing Raw SQL: ${cleanQuery}`);
+                await db.query(cleanQuery);
+            }
+        }
+
+        console.log(`✅ Schema created successfully for User ${userId}`);
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error("❌ Schema Creation Error:", error);
+
+        let safeErrorMessage = error.message;
+        const prefixRegex = new RegExp(`user_${userId}_`, 'g');
+        safeErrorMessage = safeErrorMessage.replace(prefixRegex, '');
+
+        // 🟢 FIXED: Switched error.message to safeErrorMessage so the prefix stays hidden!
+        res.json({ success: false, error: safeErrorMessage });
+    }
+});
+
+
+// 🟢 FIXED: Get User's Current Table Count
+app.get('/api/schema/status/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        // 🟢 THE TYPO FIX: Changed 'pool.query' to 'db.query'
+        const [tables] = await db.query(`SHOW TABLES LIKE 'user_${userId}_%'`);
+        
+        res.json({ success: true, count: tables.length });
+    } catch (error) {
+        console.error("Status Route Error:", error);
+        res.status(500).json({ success: false, error: "Failed to fetch table count." });
     }
 });
 
