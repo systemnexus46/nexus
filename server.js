@@ -785,10 +785,7 @@ app.post('/api/register-verify-otp', (req, res) => {
 // ==========================================
 app.post('/api/register', async (req, res) => {
     try {
-        const { fullName, email_id, password } = req.body;
-        
-        // Auto-generate a username from the first part of their email
-        const username = email_id.split('@')[0];
+        const { fullName, username, email_id, password } = req.body;
 
         // 🟢 FIX: Add "const [result] =" to capture the MySQL response
         const [result] = await db.execute(
